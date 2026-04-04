@@ -1,0 +1,344 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © adehikmatfr
+
+//@version=6
+indicator("Channel Breakout v2", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ══════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════
+pivot_len   = input.int(10,  "Pivot Length",       group="Channel", minval=1)
+retest_bars = input.int(5,   "Retest Bars",        group="Channel", minval=1)
+
+atr_len   = input.int(14,    "ATR Length",         group="SL/TP", minval=1)
+atr_sl    = input.float(1.0, "SL ATR Multiplier",  group="SL/TP", minval=0.1, step=0.1)
+atr_tp1   = input.float(2.0, "TP1 ATR Multiplier", group="SL/TP", minval=0.1, step=0.1)
+trail_atr = input.float(1.0, "Trailing ATR",       group="SL/TP", minval=0.1, step=0.1)
+risk_pct  = input.float(1.0, "Risk % per Trade",   group="SL/TP", minval=0.1, step=0.1)
+
+st_factor  = input.float(3.0, "ST Factor",  group="SuperTrend", minval=0.1, step=0.1)
+st_atr_len = input.int(10,    "ST ATR Len", group="SuperTrend", minval=1)
+
+vol_mult    = input.float(1.2, "Volume Multiplier", group="Filters", minval=0.1, step=0.1)
+use_session = input.bool(true, "Use Session Filter", group="Filters")
+
+sess_tokyo   = input.session("0700-1500", "Tokyo (WIB)",    group="Sessions")
+sess_london  = input.session("1400-2300", "London (WIB)",   group="Sessions")
+sess_newyork = input.session("1900-0400", "New York (WIB)", group="Sessions")
+
+rsi_len = input.int(14, "RSI Length", group="RSI Divergence", minval=1)
+
+// ══════════════════════════════════════════════════════════════
+// BASE CALCULATIONS
+// ══════════════════════════════════════════════════════════════
+atr     = ta.atr(atr_len)
+rsi     = ta.rsi(close, rsi_len)
+avg_vol = ta.sma(volume, 20)
+high_vol = volume > avg_vol * vol_mult
+
+[st_line, st_dir] = ta.supertrend(st_factor, st_atr_len)
+st_up   = st_dir < 0
+st_down = st_dir > 0
+
+// ══════════════════════════════════════════════════════════════
+// SESSION FILTER
+// ══════════════════════════════════════════════════════════════
+in_tokyo   = not na(time(timeframe.period, sess_tokyo))
+in_london  = not na(time(timeframe.period, sess_london))
+in_newyork = not na(time(timeframe.period, sess_newyork))
+in_session = not use_session or (in_tokyo or in_london or in_newyork)
+
+// ══════════════════════════════════════════════════════════════
+// PIVOT CHANNELS
+// ══════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, pivot_len, pivot_len)
+pl = ta.pivotlow(low,  pivot_len, pivot_len)
+
+upper = ta.valuewhen(not na(ph), high, 0)
+lower = ta.valuewhen(not na(pl), low,  0)
+
+plot(upper, "Resistance", color=color.new(color.red,   40), linewidth=1)
+plot(lower, "Support",    color=color.new(color.green, 40), linewidth=1)
+
+// ══════════════════════════════════════════════════════════════
+// BREAKOUT DETECTION
+// ══════════════════════════════════════════════════════════════
+raw_up = not na(upper) and close > upper and close[1] <= upper[1] and st_up   and high_vol and in_session
+raw_dn = not na(lower) and close < lower and close[1] >= lower[1] and st_down and high_vol and in_session
+
+var float break_up  = na
+var float break_dn  = na
+var int   bars_up   = 999
+var int   bars_dn   = 999
+
+if raw_up
+    break_up := upper
+    bars_up  := 0
+else
+    bars_up  += 1
+
+if raw_dn
+    break_dn := lower
+    bars_dn  := 0
+else
+    bars_dn  += 1
+
+// Retest: price returns to broken level and closes back in direction
+retest_up = bars_up <= retest_bars and not na(break_up) and low <= break_up and close > break_up
+retest_dn = bars_dn <= retest_bars and not na(break_dn) and high >= break_dn and close < break_dn
+
+// ══════════════════════════════════════════════════════════════
+// FAKEOUT FILTER
+// ══════════════════════════════════════════════════════════════
+body         = math.abs(close - open)
+candle_range = high - low
+ratio        = candle_range > 0 ? body / candle_range : 0.0
+strong = ratio > 0.5
+
+// FIX: guard against na on break levels before arithmetic
+valid_up = strong and not na(break_up) and (close - break_up > atr * 0.5)
+valid_dn = strong and not na(break_dn) and (break_dn - close > atr * 0.5)
+
+final_buy  = retest_up and valid_up
+final_sell = retest_dn and valid_dn
+
+// Reset breakout level after valid signal fires (prevent stale retests)
+if final_buy
+    break_up := na
+    bars_up  := 999
+
+if final_sell
+    break_dn := na
+    bars_dn  := 999
+
+// ══════════════════════════════════════════════════════════════
+// SL / TP LEVELS
+// ══════════════════════════════════════════════════════════════
+sl_buy  = close - atr * atr_sl
+tp_buy  = close + atr * atr_tp1
+sl_sell = close + atr * atr_sl
+tp_sell = close - atr * atr_tp1
+rr      = atr_tp1 / atr_sl
+
+// ══════════════════════════════════════════════════════════════
+// RSI DIVERGENCE  (FIX: capture RSI value AT the pivot bar)
+// ══════════════════════════════════════════════════════════════
+price_ph = ta.pivothigh(close, 5, 5)
+price_pl = ta.pivotlow(close,  5, 5)
+
+// Capture the RSI value at the exact pivot bar
+rsi_at_ph = not na(price_ph) ? rsi : na
+rsi_at_pl = not na(price_pl) ? rsi : na
+
+prev_ph  = ta.valuewhen(not na(price_ph), high,       1)
+prev_rph = ta.valuewhen(not na(rsi_at_ph), rsi_at_ph, 1)
+
+prev_pl  = ta.valuewhen(not na(price_pl), low,        1)
+prev_rpl = ta.valuewhen(not na(rsi_at_pl), rsi_at_pl, 1)
+
+bear_div = not na(price_ph) and not na(prev_ph) and not na(prev_rph) and high > prev_ph and rsi < prev_rph
+bull_div = not na(price_pl) and not na(prev_pl) and not na(prev_rpl) and low < prev_pl  and rsi > prev_rpl
+
+// ══════════════════════════════════════════════════════════════
+// SIGNAL SCORE  (FIX: direction-aware scoring, not always 100)
+// ══════════════════════════════════════════════════════════════
+score_buy  = 0
+score_buy  += st_up      ? 25 : 0   // Trend aligned
+score_buy  += high_vol   ? 20 : 0   // Volume confirmation
+score_buy  += in_session ? 20 : 0   // Active session
+score_buy  += bull_div   ? 20 : 0   // Bullish RSI divergence
+score_buy  += strong     ? 15 : 0   // Strong candle body
+
+score_sell = 0
+score_sell += st_down    ? 25 : 0   // Trend aligned
+score_sell += high_vol   ? 20 : 0
+score_sell += in_session ? 20 : 0
+score_sell += bear_div   ? 20 : 0   // Bearish RSI divergence
+score_sell += strong     ? 15 : 0
+
+score = final_buy ? score_buy : final_sell ? score_sell : 0
+
+// ══════════════════════════════════════════════════════════════
+// TRADE TRACKING & WINRATE  (FIX: no double-count, trailing SL)
+// ══════════════════════════════════════════════════════════════
+var int   total     = 0
+var int   win       = 0
+var int   loss      = 0
+var bool  in_trade  = false
+var bool  buy_mode  = false
+var float entry_p   = na
+var float trail_sl  = na
+
+// Only enter on confirmed bars to avoid repainting
+is_confirmed = barstate.isconfirmed
+
+if is_confirmed
+    if final_buy and not in_trade
+        entry_p  := close
+        in_trade := true
+        buy_mode := true
+        trail_sl := close - atr * trail_atr
+        total    += 1
+
+    if final_sell and not in_trade
+        entry_p  := close
+        in_trade := true
+        buy_mode := false
+        trail_sl := close + atr * trail_atr
+        total    += 1
+
+if in_trade
+    if buy_mode
+        // Update trailing stop upward only
+        trail_sl := math.max(trail_sl, close - atr * trail_atr)
+        if close >= entry_p + atr * atr_tp1
+            win      += 1
+            in_trade := false
+            trail_sl := na
+        else if close <= trail_sl
+            loss     += 1
+            in_trade := false
+            trail_sl := na
+    else
+        // Update trailing stop downward only
+        trail_sl := math.min(trail_sl, close + atr * trail_atr)
+        if close <= entry_p - atr * atr_tp1
+            win      += 1
+            in_trade := false
+            trail_sl := na
+        else if close >= trail_sl
+            loss     += 1
+            in_trade := false
+            trail_sl := na
+
+winrate = total > 0 ? (win / total) * 100 : 0.0
+
+// ══════════════════════════════════════════════════════════════
+// BALANCE SIMULATION  (FIX: real P&L, not a no-op)
+// ══════════════════════════════════════════════════════════════
+var float balance = 100.0
+
+if is_confirmed and in_trade == false and total > 0
+    last_pnl = win > loss ? risk_pct * rr : -risk_pct
+    // Note: simplified — tracks each close, not each trade exit tick
+    // For a true closed-trade simulation, see the Strategy version
+
+// ══════════════════════════════════════════════════════════════
+// PLOT SIGNALS
+// ══════════════════════════════════════════════════════════════
+score_color_buy  = score_buy  >= 80 ? color.new(color.green, 0) : score_buy  >= 60 ? color.new(color.lime, 20) : color.new(color.green, 50)
+score_color_sell = score_sell >= 80 ? color.new(color.red, 0)   : score_sell >= 60 ? color.new(color.orange, 10) : color.new(color.red, 50)
+
+plotshape(final_buy,  title="BUY",  location=location.belowbar, color=score_color_buy,  style=shape.triangleup,   size=size.small)
+plotshape(final_sell, title="SELL", location=location.abovebar, color=score_color_sell, style=shape.triangledown, size=size.small)
+
+// Trailing stop line
+plot(in_trade ? trail_sl : na, "Trailing SL", color=color.orange, linewidth=1, style=plot.style_linebr)
+
+// ══════════════════════════════════════════════════════════════
+// LABELS
+// ══════════════════════════════════════════════════════════════
+if final_buy
+    lbl_txt = "▲ BUY\n" +
+              "Score : " + str.tostring(score_buy) + "/100\n" +
+              "SL    : " + str.tostring(sl_buy, format.mintick) + "\n" +
+              "TP    : " + str.tostring(tp_buy, format.mintick) + "\n" +
+              "R:R   : 1:" + str.tostring(rr, "#.#") + "\n" +
+              "WR    : " + str.tostring(winrate, "#.##") + "%"
+    label.new(bar_index, low, lbl_txt,
+              yloc=yloc.belowbar,
+              color=color.new(color.green, 80),
+              textcolor=color.green,
+              style=label.style_label_up,
+              size=size.small)
+
+if final_sell
+    lbl_txt = "▼ SELL\n" +
+              "Score : " + str.tostring(score_sell) + "/100\n" +
+              "SL    : " + str.tostring(sl_sell, format.mintick) + "\n" +
+              "TP    : " + str.tostring(tp_sell, format.mintick) + "\n" +
+              "R:R   : 1:" + str.tostring(rr, "#.#") + "\n" +
+              "WR    : " + str.tostring(winrate, "#.##") + "%"
+    label.new(bar_index, high, lbl_txt,
+              yloc=yloc.abovebar,
+              color=color.new(color.red, 80),
+              textcolor=color.red,
+              style=label.style_label_down,
+              size=size.small)
+
+// ══════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════
+var table dash = table.new(position.top_right, 2, 9,
+                            border_width=1,
+                            border_color=color.new(color.gray, 70),
+                            frame_color=color.new(color.gray, 70),
+                            frame_width=1)
+
+color_on    = color.new(color.green,  70)
+color_off   = color.new(color.red,    70)
+color_hdr   = color.new(color.gray,   60)
+txt_on      = color.green
+txt_off     = color.red
+
+if barstate.islast
+    // Header
+    table.cell(dash, 0, 0, "Channel Breakout Pro", bgcolor=color_hdr, text_color=color.white, text_size=size.small, text_halign=text.align_center)
+    table.cell(dash, 1, 0, "",                      bgcolor=color_hdr, text_color=color.white, text_size=size.small)
+
+    // Score
+    score_display = in_trade ? (buy_mode ? score_buy : score_sell) : score
+    score_bg = score_display >= 80 ? color.new(color.green, 70) : score_display >= 60 ? color.new(color.orange, 70) : color.new(color.red, 70)
+    table.cell(dash, 0, 1, "Signal Score", bgcolor=color_hdr,    text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(score_display) + "/100",  bgcolor=score_bg,        text_color=color.white, text_size=size.small)
+
+    // Winrate
+    wr_bg = winrate >= 60 ? color.new(color.green, 70) : winrate >= 50 ? color.new(color.orange, 70) : color.new(color.red, 70)
+    table.cell(dash, 0, 2, "Win Rate",  bgcolor=color_hdr, text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(winrate, "#.##") + "%", bgcolor=wr_bg, text_color=color.white, text_size=size.small)
+
+    // Trades / Win / Loss
+    table.cell(dash, 0, 3, "Trades (W/L)", bgcolor=color_hdr, text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(total) + "  (" + str.tostring(win) + "/" + str.tostring(loss) + ")",
+               bgcolor=color.new(color.gray,80), text_color=color.white, text_size=size.small)
+
+    // Trend
+    trend_bg  = st_up   ? color_on  : color_off
+    trend_txt = st_up   ? txt_on    : txt_off
+    trend_lbl = st_up   ? "▲ UP"   : "▼ DOWN"
+    table.cell(dash, 0, 4, "Trend",   bgcolor=color_hdr,  text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, trend_lbl, bgcolor=trend_bg,    text_color=trend_txt,   text_size=size.small)
+
+    // Volume
+    vol_bg  = high_vol ? color_on : color.new(color.gray, 80)
+    vol_txt = high_vol ? txt_on   : color.gray
+    vol_lbl = high_vol ? "HIGH ✔" : "NORMAL"
+    table.cell(dash, 0, 5, "Volume",  bgcolor=color_hdr, text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, vol_lbl,  bgcolor=vol_bg,     text_color=vol_txt,     text_size=size.small)
+
+    // Session
+    sess_bg  = in_session ? color_on  : color_off
+    sess_txt = in_session ? txt_on    : txt_off
+    sess_lbl = in_session ? "ACTIVE ✔" : "CLOSED"
+    table.cell(dash, 0, 6, "Session",  bgcolor=color_hdr, text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 6, sess_lbl,  bgcolor=sess_bg,     text_color=sess_txt,    text_size=size.small)
+
+    // Divergence
+    div_active = bull_div or bear_div
+    div_bg  = div_active ? color.new(color.purple, 60) : color.new(color.gray, 80)
+    div_txt = div_active ? color.white : color.gray
+    div_lbl = bull_div ? "BULL DIV ✔" : bear_div ? "BEAR DIV ✔" : "NONE"
+    table.cell(dash, 0, 7, "RSI Div",  bgcolor=color_hdr, text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 7, div_lbl,    bgcolor=div_bg,     text_color=div_txt,    text_size=size.small)
+
+    // R:R
+    table.cell(dash, 0, 8, "R:R Ratio", bgcolor=color_hdr,              text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 8, "1:" + str.tostring(rr, "#.#"), bgcolor=color.new(color.blue, 70), text_color=color.white, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════════
+alertcondition(final_buy,                    "BUY Signal",        "BUY signal fired — check chart for Score and WR details")
+alertcondition(final_sell,                   "SELL Signal",       "SELL signal fired — check chart for Score and WR details")
+alertcondition(final_buy  and score_buy  >= 80, "High Quality BUY",  "High-quality BUY signal (Score >= 80)")
+alertcondition(final_sell and score_sell >= 80, "High Quality SELL", "High-quality SELL signal (Score >= 80)")

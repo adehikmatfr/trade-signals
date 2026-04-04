@@ -1,0 +1,128 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © adehikmatfr
+//@version=6
+indicator("Channel Breakout v1", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ── INPUT: CHANNEL ───────────────────────────────────────────
+pivot_len    = input.int(10,  "Pivot Length (Channel)", group="Channel")
+retest_bars  = input.int(5,   "Max Bar Tunggu Retest",  group="Channel")
+
+// ── INPUT: ATR / SL / TP ─────────────────────────────────────
+atr_len      = input.int(14,  "ATR Length",            group="SL/TP")
+atr_sl       = input.float(1.0, "ATR x SL",             group="SL/TP", step=0.1)
+atr_tp1      = input.float(2.0, "ATR x TP1",            group="SL/TP", step=0.1)
+atr_tp2      = input.float(4.0, "ATR x TP2",            group="SL/TP", step=0.1)
+trail_atr    = input.float(1.0, "Trailing Stop ATR x",  group="SL/TP", step=0.1)
+
+// ── INPUT: SUPERTREND ────────────────────────────────────────
+st_factor    = input.float(3.0, "Supertrend Factor", group="Supertrend")
+st_atr_len   = input.int(10,  "Supertrend ATR Len", group="Supertrend")
+
+// ── INPUT: FILTER ────────────────────────────────────────────
+vol_mult     = input.float(1.2, "Volume Multiplier", group="Filter", step=0.1)
+use_session  = input.bool(true, "Filter Sesi Waktu", group="Filter")
+
+// 🇮🇩 WIB Sessions
+sess_tokyo   = input.session("0700-1500", "Tokyo (WIB)", group="Filter")
+sess_london  = input.session("1400-2300", "London (WIB)", group="Filter")
+sess_newyork = input.session("1900-0400", "New York (WIB)", group="Filter")
+
+rsi_len      = input.int(14, "RSI Length", group="Filter")
+
+// ── KALKULASI DASAR ──────────────────────────────────────────
+atr      = ta.atr(atr_len)
+rsi      = ta.rsi(close, rsi_len)
+avg_vol  = ta.sma(volume, 20)
+high_vol = volume > avg_vol * vol_mult
+
+[st_line, st_dir] = ta.supertrend(st_factor, st_atr_len)
+st_up   = st_dir < 0
+st_down = st_dir > 0
+
+// ── FILTER SESI (FIX BOOL) ───────────────────────────────────
+in_tokyo   = not na(time(timeframe.period, sess_tokyo))
+in_london  = not na(time(timeframe.period, sess_london))
+in_newyork = not na(time(timeframe.period, sess_newyork))
+
+in_session = not use_session or (in_tokyo or in_london or in_newyork)
+
+// ── PIVOT CHANNEL (SAFE) ─────────────────────────────────────
+ph = ta.pivothigh(high, pivot_len, pivot_len)
+pl = ta.pivotlow(low,  pivot_len, pivot_len)
+
+upper_pivot = ta.valuewhen(not na(ph), high, 0)
+lower_pivot = ta.valuewhen(not na(pl), low,  0)
+
+plot(upper_pivot, "Resistance", color=color.new(color.red, 50), style=plot.style_stepline)
+plot(lower_pivot, "Support",    color=color.new(color.green, 50), style=plot.style_stepline)
+
+// ── BREAKOUT ────────────────────────────────────────────────
+raw_break_up = not na(upper_pivot) and close > upper_pivot and close[1] <= upper_pivot[1] and st_up and high_vol and in_session
+raw_break_dn = not na(lower_pivot) and close < lower_pivot and close[1] >= lower_pivot[1] and st_down and high_vol and in_session
+
+// ── RETEST SYSTEM ───────────────────────────────────────────
+var int   bars_since_break_up = 999
+var int   bars_since_break_dn = 999
+var float break_level_up      = na
+var float break_level_dn      = na
+
+if raw_break_up
+    bars_since_break_up := 0
+    break_level_up      := upper_pivot
+else
+    bars_since_break_up += 1
+
+if raw_break_dn
+    bars_since_break_dn := 0
+    break_level_dn      := lower_pivot
+else
+    bars_since_break_dn += 1
+
+retest_up = bars_since_break_up <= retest_bars and not na(break_level_up) and low <= break_level_up and close > break_level_up and st_up
+retest_dn = bars_since_break_dn <= retest_bars and not na(break_level_dn) and high >= break_level_dn and close < break_level_dn and st_down
+
+// ── RSI DIVERGENCE (FIX CW10002) ───────────────────────────
+rsi_ph   = ta.pivothigh(rsi, 5, 5)
+rsi_pl   = ta.pivotlow(rsi,  5, 5)
+price_ph = ta.pivothigh(close, 5, 5)
+price_pl = ta.pivotlow(close,  5, 5)
+
+// simpan hasil valuewhen ke variable global
+prev_price_high = ta.valuewhen(not na(price_ph), high, 1)
+prev_rsi_high   = ta.valuewhen(not na(rsi_ph), rsi, 1)
+
+prev_price_low  = ta.valuewhen(not na(price_pl), low, 1)
+prev_rsi_low    = ta.valuewhen(not na(rsi_pl), rsi, 1)
+
+// baru dipakai di logic
+bear_div = not na(price_ph) and not na(rsi_ph) and 
+           not na(prev_price_high) and not na(prev_rsi_high) and
+           high > prev_price_high and rsi < prev_rsi_high
+
+bull_div = not na(price_pl) and not na(rsi_pl) and 
+           not na(prev_price_low) and not na(prev_rsi_low) and
+           low < prev_price_low and rsi > prev_rsi_low
+plotshape(bear_div, style=shape.diamond, location=location.abovebar, color=color.orange, size=size.tiny)
+plotshape(bull_div, style=shape.diamond, location=location.belowbar, color=color.aqua, size=size.tiny)
+
+// ── TRAILING STOP ───────────────────────────────────────────
+var float trail_sl_buy  = na
+var float trail_sl_sell = na
+
+if retest_up
+    trail_sl_buy := close - atr * trail_atr
+else if not na(trail_sl_buy)
+    trail_sl_buy := math.max(trail_sl_buy, close - atr * trail_atr)
+
+if retest_dn
+    trail_sl_sell := close + atr * trail_atr
+else if not na(trail_sl_sell)
+    trail_sl_sell := math.min(trail_sl_sell, close + atr * trail_atr)
+
+// ── SIGNAL ─────────────────────────────────────────────────
+plotshape(retest_up, title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.large)
+plotshape(retest_dn, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.large)
+
+// ── ALERT ──────────────────────────────────────────────────
+alertcondition(retest_up, "BUY",  "Breakout Retest BUY")
+alertcondition(retest_dn, "SELL", "Breakout Retest SELL")
