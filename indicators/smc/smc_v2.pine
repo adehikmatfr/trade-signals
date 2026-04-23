@@ -1,0 +1,719 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+indicator("SMC Pro V2", overlay=true,
+          max_bars_back=500,
+          max_lines_count=500,
+          max_boxes_count=300,
+          max_labels_count=500)
+
+// ══════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════
+
+// ── Structure ──────────────────────────────────────────────
+grp_st    = "── Market Structure ──"
+showBOS   = input.bool(true,  "Show BOS",          group=grp_st)
+showCHoCH = input.bool(true,  "Show CHoCH",        group=grp_st)
+structLen = input.int(10,     "Swing Length",       group=grp_st, minval=3, maxval=50)
+
+// ── Order Block ────────────────────────────────────────────
+grp_ob    = "── Order Block ──"
+showOB    = input.bool(true,  "Show Order Block",  group=grp_ob)
+obBullCol = input.color(color.new(#00bcd4, 75), "Bull OB Color", group=grp_ob)
+obBearCol = input.color(color.new(#ff5252, 75), "Bear OB Color", group=grp_ob)
+obMitCol  = input.color(color.new(color.gray, 85), "Mitigated OB", group=grp_ob)
+showOBMit = input.bool(true,  "Show Mitigated OB", group=grp_ob)
+
+// ── FVG ────────────────────────────────────────────────────
+grp_fvg   = "── Fair Value Gap ──"
+showFVG   = input.bool(true,  "Show FVG",          group=grp_fvg)
+fvgBullC  = input.color(color.new(#00bcd4, 85), "Bullish FVG", group=grp_fvg)
+fvgBearC  = input.color(color.new(#ff5252, 85), "Bearish FVG", group=grp_fvg)
+hideMitFVG= input.bool(true,  "Hide Mitigated FVG",group=grp_fvg)
+
+// ── Supply & Demand ────────────────────────────────────────
+grp_sd    = "── Supply & Demand ──"
+showSup   = input.bool(true,  "Show Supply Zone",  group=grp_sd)
+showDem   = input.bool(true,  "Show Demand Zone",  group=grp_sd)
+supCol    = input.color(color.new(#ff5252, 75), "Supply Color", group=grp_sd)
+demCol    = input.color(color.new(#00bcd4, 75), "Demand Color", group=grp_sd)
+
+// ── Fibonacci ──────────────────────────────────────────────
+grp_fib   = "── Fibonacci ──"
+showFib   = input.bool(true,  "Show Fibonacci",    group=grp_fib)
+showF382  = input.bool(true,  "0.382",             group=grp_fib)
+showF50   = input.bool(true,  "0.500",             group=grp_fib)
+showF618  = input.bool(true,  "0.618 (Golden)",    group=grp_fib)
+showF705  = input.bool(true,  "0.705",             group=grp_fib)
+showF786  = input.bool(true,  "0.786",             group=grp_fib)
+
+// ── HTF Trend ──────────────────────────────────────────────
+grp_htf   = "── HTF Trend Filter ──"
+useHTF    = input.bool(true,  "Enable HTF Filter", group=grp_htf)
+htf_tf    = input.timeframe("240", "HTF Timeframe",group=grp_htf)
+
+// ── SL/TP & Risk ───────────────────────────────────────────
+grp_risk  = "── SL / TP & Risk ──"
+atr_sl    = input.float(1.5,  "SL ATR Mult",       group=grp_risk, minval=0.1, step=0.1)
+atr_tp1   = input.float(1.5,  "TP1 ATR Mult",      group=grp_risk, minval=0.1, step=0.1)
+atr_tp2   = input.float(2.5,  "TP2 ATR Mult",      group=grp_risk, minval=0.1, step=0.1)
+trail_atr = input.float(1.0,  "Trailing ATR",      group=grp_risk, minval=0.1, step=0.1)
+trail_tp1 = input.bool(true,  "Trail After TP1",   group=grp_risk)
+risk_pct  = input.float(1.0,  "Risk % per Trade",  group=grp_risk, minval=0.1, step=0.1)
+max_streak= input.int(3,      "Max Loss Streak",   group=grp_risk, minval=1)
+
+// ── Session ────────────────────────────────────────────────
+grp_sess  = "── Sessions ──"
+useSess   = input.bool(true,  "Use Session Filter",group=grp_sess)
+sess_tok  = input.session("0700-1500", "Tokyo (WIB)",   group=grp_sess)
+sess_lon  = input.session("1400-2300", "London (WIB)",  group=grp_sess)
+sess_ny   = input.session("1900-0400", "New York (WIB)",group=grp_sess)
+
+// ── Signal Score ───────────────────────────────────────────
+grp_sc    = "── Signal Score ──"
+min_score = input.int(60, "Min Score to Trade", group=grp_sc, minval=0, maxval=100)
+
+// ══════════════════════════════════════════════════════════════
+// BASE CALCULATIONS
+// ══════════════════════════════════════════════════════════════
+atr14     = ta.atr(14)
+ema20     = ta.ema(close, 20)
+ema50     = ta.ema(close, 50)
+rsi14     = ta.rsi(close, 14)
+avg_vol   = ta.sma(volume, 20)
+
+body      = math.abs(close - open)
+avgBody   = ta.sma(body, 10)
+high_vol  = volume > avg_vol * 1.5
+
+trendBull = ema20 > ema50
+trendBear = ema20 < ema50
+
+// ══════════════════════════════════════════════════════════════
+// HTF TREND
+// ══════════════════════════════════════════════════════════════
+htf_close = request.security(syminfo.tickerid, htf_tf, close,           lookahead=barmerge.lookahead_off)
+htf_ema   = request.security(syminfo.tickerid, htf_tf, ta.ema(close,50),lookahead=barmerge.lookahead_off)
+htf_bull  = htf_close > htf_ema
+htf_bear  = htf_close < htf_ema
+htf_ob    = not useHTF or htf_bull   // OK for buy
+htf_os    = not useHTF or htf_bear   // OK for sell
+
+// ══════════════════════════════════════════════════════════════
+// SESSION
+// ══════════════════════════════════════════════════════════════
+in_tok    = not na(time(timeframe.period, sess_tok))
+in_lon    = not na(time(timeframe.period, sess_lon))
+in_ny     = not na(time(timeframe.period, sess_ny))
+in_sess   = not useSess or (in_tok or in_lon or in_ny)
+sess_lbl  = in_tok ? "Tokyo" : in_lon ? "London" : in_ny ? "New York" : "Closed"
+
+// ══════════════════════════════════════════════════════════════
+// SWING HIGH / LOW
+// ══════════════════════════════════════════════════════════════
+swingH = ta.pivothigh(high, structLen, structLen)
+swingL = ta.pivotlow(low,  structLen, structLen)
+
+var float lastSH   = na
+var float lastSL   = na
+var float prevSH   = na
+var float prevSL   = na
+var int   lastSHBr = na
+var int   lastSLBr = na
+
+if not na(swingH)
+    prevSH   := lastSH
+    lastSH   := swingH
+    lastSHBr := bar_index[structLen]
+
+if not na(swingL)
+    prevSL   := lastSL
+    lastSL   := swingL
+    lastSLBr := bar_index[structLen]
+
+// ══════════════════════════════════════════════════════════════
+// BOS & CHoCH
+// ══════════════════════════════════════════════════════════════
+bullBOS = not na(lastSH) and close > lastSH and close[1] <= lastSH
+bearBOS = not na(lastSL) and close < lastSL and close[1] >= lastSL
+bullCH  = not na(prevSH) and close > prevSH and close[1] <= prevSH and bearBOS[1]
+bearCH  = not na(prevSL) and close < prevSL and close[1] >= prevSL and bullBOS[1]
+
+labelOff  = atr14
+labelOffL = atr14 * 1.5
+
+if showBOS
+    if bullBOS
+        label.new(bar_index, low  - labelOff,  "BOS ▲",
+                  style=label.style_label_up,   color=color.new(#00bcd4,20), textcolor=color.white, size=size.small)
+    if bearBOS
+        label.new(bar_index, high + labelOff,  "BOS ▼",
+                  style=label.style_label_down, color=color.new(#ff5252,20), textcolor=color.white, size=size.small)
+
+if showCHoCH
+    if bullCH
+        label.new(bar_index, low  - labelOffL, "CHoCH ▲",
+                  style=label.style_label_up,   color=color.new(#ffeb3b,20), textcolor=color.black, size=size.small)
+    if bearCH
+        label.new(bar_index, high + labelOffL, "CHoCH ▼",
+                  style=label.style_label_down, color=color.new(#ffeb3b,20), textcolor=color.black, size=size.small)
+
+// ══════════════════════════════════════════════════════════════
+// ORDER BLOCK DETECTION
+// ══════════════════════════════════════════════════════════════
+obBullTop = not na(swingL) ? open[structLen]  : na
+obBullBot = not na(swingL) ? close[structLen] : na
+obBearTop = not na(swingH) ? close[structLen] : na
+obBearBot = not na(swingH) ? open[structLen]  : na
+
+validBullOB = not na(swingL) and open[structLen]  > close[structLen]
+validBearOB = not na(swingH) and close[structLen] > open[structLen]
+
+var box[]   obBoxes  = array.new_box()
+var bool[]  obIsBull = array.new_bool()
+var float[] obTop    = array.new_float()
+var float[] obBot    = array.new_float()
+var bool[]  obMit    = array.new_bool()
+
+if showOB
+    if validBullOB
+        bx = box.new(lastSLBr - structLen, math.max(obBullTop, obBullBot),
+                     bar_index + 30,       math.min(obBullTop, obBullBot),
+                     bgcolor=obBullCol, border_color=color.new(#00bcd4,40), border_width=1)
+        array.push(obBoxes,  bx)
+        array.push(obIsBull, true)
+        array.push(obTop,    math.max(obBullTop, obBullBot))
+        array.push(obBot,    math.min(obBullTop, obBullBot))
+        array.push(obMit,    false)
+        label.new(lastSLBr, math.min(obBullTop, obBullBot) - atr14 * 0.4,
+                  "OB+", style=label.style_label_up,
+                  color=color.new(#00bcd4,30), textcolor=color.white, size=size.tiny)
+
+    if validBearOB
+        bx = box.new(lastSHBr - structLen, math.max(obBearTop, obBearBot),
+                     bar_index + 30,       math.min(obBearTop, obBearBot),
+                     bgcolor=obBearCol, border_color=color.new(#ff5252,40), border_width=1)
+        array.push(obBoxes,  bx)
+        array.push(obIsBull, false)
+        array.push(obTop,    math.max(obBearTop, obBearBot))
+        array.push(obBot,    math.min(obBearTop, obBearBot))
+        array.push(obMit,    false)
+        label.new(lastSHBr, math.max(obBearTop, obBearBot) + atr14 * 0.4,
+                  "OB−", style=label.style_label_down,
+                  color=color.new(#ff5252,30), textcolor=color.white, size=size.tiny)
+
+// Extend & detect OB mitigation
+if array.size(obBoxes) > 0
+    for i = array.size(obBoxes) - 1 to 0
+        bx     = array.get(obBoxes,  i)
+        isBull = array.get(obIsBull, i)
+        top    = array.get(obTop,    i)
+        bot    = array.get(obBot,    i)
+        isMit  = array.get(obMit,    i)
+        box.set_right(bx, bar_index + 5)
+        if not isMit
+            mitigated = isBull ? close < bot : close > top
+            if mitigated
+                array.set(obMit, i, true)
+                if showOBMit
+                    box.set_bgcolor(bx, obMitCol)
+                else
+                    box.delete(bx)
+                    array.remove(obBoxes,  i)
+                    array.remove(obIsBull, i)
+                    array.remove(obTop,    i)
+                    array.remove(obBot,    i)
+                    array.remove(obMit,    i)
+
+// ══════════════════════════════════════════════════════════════
+// FAIR VALUE GAP
+// ══════════════════════════════════════════════════════════════
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+
+var box[]   fvgBoxes = array.new_box()
+var bool[]  fvgBull  = array.new_bool()
+var float[] fvgTop   = array.new_float()
+var float[] fvgBot   = array.new_float()
+
+if showFVG
+    if bullFVG
+        bx = box.new(bar_index[2], low, bar_index + 20, high[2],
+                     bgcolor=fvgBullC, border_color=color.new(#00bcd4,50), border_width=1)
+        array.push(fvgBoxes, bx)
+        array.push(fvgBull,  true)
+        array.push(fvgTop,   low)
+        array.push(fvgBot,   high[2])
+        label.new(bar_index[1], math.avg(low, high[2]), "FVG+",
+                  style=label.style_label_right, color=color.new(#00bcd4,60),
+                  textcolor=color.white, size=size.tiny)
+
+    if bearFVG
+        bx = box.new(bar_index[2], high, bar_index + 20, low[2],
+                     bgcolor=fvgBearC, border_color=color.new(#ff5252,50), border_width=1)
+        array.push(fvgBoxes, bx)
+        array.push(fvgBull,  false)
+        array.push(fvgTop,   high)
+        array.push(fvgBot,   low[2])
+        label.new(bar_index[1], math.avg(high, low[2]), "FVG−",
+                  style=label.style_label_right, color=color.new(#ff5252,60),
+                  textcolor=color.white, size=size.tiny)
+
+if array.size(fvgBoxes) > 0
+    for i = array.size(fvgBoxes) - 1 to 0
+        bx     = array.get(fvgBoxes, i)
+        isBull = array.get(fvgBull,  i)
+        top    = array.get(fvgTop,   i)
+        bot    = array.get(fvgBot,   i)
+        box.set_right(bx, bar_index + 5)
+        if hideMitFVG
+            mitigated = isBull ? close < top : close > bot
+            if mitigated
+                box.delete(bx)
+                array.remove(fvgBoxes, i)
+                array.remove(fvgBull,  i)
+                array.remove(fvgTop,   i)
+                array.remove(fvgBot,   i)
+
+// ══════════════════════════════════════════════════════════════
+// SUPPLY & DEMAND ZONES
+// ══════════════════════════════════════════════════════════════
+atrSwing   = atr14[structLen]
+supplyZone = not na(swingH) and (high[structLen] - close[structLen]) > atrSwing * 0.5
+demandZone = not na(swingL) and (close[structLen] - low[structLen])  > atrSwing * 0.5
+
+if showSup and supplyZone
+    box.new(bar_index[structLen] - structLen, high[structLen],
+            bar_index + 30,                   high[structLen] - atrSwing * 0.8,
+            bgcolor=supCol, border_color=color.new(#ff5252,40), border_width=1)
+    label.new(bar_index[structLen], high[structLen] + atrSwing * 0.3,
+              "Supply", style=label.style_label_down,
+              color=color.new(#ff5252,30), textcolor=color.white, size=size.small)
+
+if showDem and demandZone
+    box.new(bar_index[structLen] - structLen, low[structLen],
+            bar_index + 30,                   low[structLen] + atrSwing * 0.8,
+            bgcolor=demCol, border_color=color.new(#00bcd4,40), border_width=1)
+    label.new(bar_index[structLen], low[structLen] - atrSwing * 0.3,
+              "Demand", style=label.style_label_up,
+              color=color.new(#00bcd4,30), textcolor=color.white, size=size.small)
+
+// ══════════════════════════════════════════════════════════════
+// FIBONACCI RETRACEMENT
+// ══════════════════════════════════════════════════════════════
+var float fibH = na
+var float fibL = na
+if not na(swingH)
+    fibH := swingH
+if not na(swingL)
+    fibL := swingL
+
+drawFib(level, fh, fl, clr) =>
+    p = fh - (fh - fl) * level
+    line.new(bar_index - 30, p, bar_index + 10, p,
+             color=clr, width=1, style=line.style_dashed)
+    label.new(bar_index + 10, p,
+              str.tostring(level, "#.###") + "  " + str.tostring(math.round(p, 5)),
+              style=label.style_label_left,
+              color=color.new(color.black,80),
+              textcolor=clr, size=size.tiny)
+
+if showFib and not na(fibH) and not na(fibL) and fibH != fibL
+    if showF382
+        drawFib(0.382, fibH, fibL, color.new(#b0bec5,20))
+    if showF50
+        drawFib(0.500, fibH, fibL, color.new(#90a4ae,20))
+    if showF618
+        drawFib(0.618, fibH, fibL, color.new(#ffeb3b,10))
+    if showF705
+        drawFib(0.705, fibH, fibL, color.new(#ff9800,20))
+    if showF786
+        drawFib(0.786, fibH, fibL, color.new(#ff5252,20))
+
+// ══════════════════════════════════════════════════════════════
+// RSI DIVERGENCE
+// ══════════════════════════════════════════════════════════════
+pph = ta.pivothigh(close, 5, 5)
+ppl = ta.pivotlow(close,  5, 5)
+
+rsi_at_ph = not na(pph) ? rsi14 : na
+rsi_at_pl = not na(ppl) ? rsi14 : na
+
+prev_ph   = ta.valuewhen(not na(pph),      high,      1)
+prev_rph  = ta.valuewhen(not na(rsi_at_ph),rsi_at_ph, 1)
+prev_pl   = ta.valuewhen(not na(ppl),      low,       1)
+prev_rpl  = ta.valuewhen(not na(rsi_at_pl),rsi_at_pl, 1)
+
+bearDiv = not na(pph) and not na(prev_ph) and not na(prev_rph) and high > prev_ph and rsi14 < prev_rph
+bullDiv = not na(ppl) and not na(prev_pl) and not na(prev_rpl) and low  < prev_pl and rsi14 > prev_rpl
+
+// ══════════════════════════════════════════════════════════════
+// MOMENTUM EXHAUSTION
+// ══════════════════════════════════════════════════════════════
+exhaustion = body < avgBody * 0.4
+
+plotshape(exhaustion and close > open, "Bull Exhaustion",
+          shape.circle, location.belowbar, color.new(#ffeb3b,40), size=size.tiny)
+plotshape(exhaustion and close < open, "Bear Exhaustion",
+          shape.circle, location.abovebar, color.new(#ffeb3b,40), size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════
+// FAKEOUT FILTER
+// ══════════════════════════════════════════════════════════════
+candle_range = high - low
+close_pos    = candle_range > 0 ? (close - low) / candle_range : 0.5
+body_ratio   = candle_range > 0 ? body / candle_range : 0.0
+
+strong_bull_c = body_ratio > 0.5 and close_pos > 0.7
+strong_bear_c = body_ratio > 0.5 and close_pos < 0.3
+
+// ══════════════════════════════════════════════════════════════
+// SIGNAL SCORE
+// ══════════════════════════════════════════════════════════════
+score_buy  = 0
+score_buy  += trendBull     ? 20 : 0
+score_buy  += htf_ob        ? 15 : 0
+score_buy  += high_vol      ? 15 : 0
+score_buy  += in_sess       ? 15 : 0
+score_buy  += bullDiv       ? 20 : 0
+score_buy  += strong_bull_c ? 15 : 0
+
+score_sell = 0
+score_sell += trendBear     ? 20 : 0
+score_sell += htf_os        ? 15 : 0
+score_sell += high_vol      ? 15 : 0
+score_sell += in_sess       ? 15 : 0
+score_sell += bearDiv       ? 20 : 0
+score_sell += strong_bear_c ? 15 : 0
+
+// ══════════════════════════════════════════════════════════════
+// ENTRY CONFLUENCE
+// ══════════════════════════════════════════════════════════════
+inBullOB = false
+inBearOB = false
+if array.size(obBoxes) > 0
+    for i = 0 to array.size(obBoxes) - 1
+        if array.get(obIsBull, i) and not array.get(obMit, i)
+            if close >= array.get(obBot, i) and close <= array.get(obTop, i)
+                inBullOB := true
+        if not array.get(obIsBull, i) and not array.get(obMit, i)
+            if close >= array.get(obBot, i) and close <= array.get(obTop, i)
+                inBearOB := true
+
+inBullFVG = false
+inBearFVG = false
+if array.size(fvgBoxes) > 0
+    for i = 0 to array.size(fvgBoxes) - 1
+        if array.get(fvgBull, i)
+            if close >= array.get(fvgBot, i) and close <= array.get(fvgTop, i)
+                inBullFVG := true
+        if not array.get(fvgBull, i)
+            if close >= array.get(fvgBot, i) and close <= array.get(fvgTop, i)
+                inBearFVG := true
+
+// Additional OB/FVG bonus to score
+score_buy  += inBullOB  or inBullFVG ? 10 : 0
+score_sell += inBearOB  or inBearFVG ? 10 : 0
+
+// ── Pre-signal conditions ───────────────────────────────────
+pre_buy  = (bullBOS or bullCH) and trendBull and htf_ob  and in_sess and strong_bull_c and score_buy  >= min_score
+pre_sell = (bearBOS or bearCH) and trendBear and htf_os  and in_sess and strong_bear_c and score_sell >= min_score
+
+// ══════════════════════════════════════════════════════════════
+// DRAWDOWN PROTECTION
+// ══════════════════════════════════════════════════════════════
+var int loss_streak = 0
+trade_ok = loss_streak < max_streak
+
+final_buy  = pre_buy  and trade_ok
+final_sell = pre_sell and trade_ok
+
+// ══════════════════════════════════════════════════════════════
+// SL / TP
+// ══════════════════════════════════════════════════════════════
+sl_buy   = close - atr14 * atr_sl
+tp1_buy  = close + atr14 * atr_tp1
+tp2_buy  = close + atr14 * atr_tp2
+sl_sell  = close + atr14 * atr_sl
+tp1_sell = close - atr14 * atr_tp1
+tp2_sell = close - atr14 * atr_tp2
+rr1      = atr_tp1 / atr_sl
+rr2      = atr_tp2 / atr_sl
+
+// ══════════════════════════════════════════════════════════════
+// TRADE TRACKING
+// ══════════════════════════════════════════════════════════════
+var int   total      = 0
+var int   wins       = 0
+var int   losses     = 0
+var bool  in_trade   = false
+var bool  buy_mode   = false
+var float entry_p    = na
+var float trail_sl   = na
+var bool  tp1_hit    = false
+
+var float balance    = 100.0
+var float peak_bal   = 100.0
+var float max_dd     = 0.0
+
+is_conf = barstate.isconfirmed
+
+if is_conf
+    if final_buy and not in_trade
+        entry_p  := close
+        in_trade := true
+        buy_mode := true
+        tp1_hit  := false
+        trail_sl := trail_tp1 ? close - atr14 * atr_sl : close - atr14 * trail_atr
+        total    += 1
+    if final_sell and not in_trade
+        entry_p  := close
+        in_trade := true
+        buy_mode := false
+        tp1_hit  := false
+        trail_sl := trail_tp1 ? close + atr14 * atr_sl : close + atr14 * trail_atr
+        total    += 1
+
+if in_trade and is_conf
+    if buy_mode
+        if not tp1_hit and close >= entry_p + atr14 * atr_tp1
+            tp1_hit  := true
+            trail_sl := entry_p
+        if tp1_hit or not trail_tp1
+            trail_sl := math.max(trail_sl, close - atr14 * trail_atr)
+        if close >= entry_p + atr14 * atr_tp2
+            wins        += 1
+            loss_streak := 0
+            balance     += risk_pct * rr2
+            peak_bal    := math.max(peak_bal, balance)
+            in_trade    := false
+            trail_sl    := na
+            tp1_hit     := false
+        else if close <= trail_sl
+            if tp1_hit
+                wins        += 1
+                loss_streak := 0
+                balance     += risk_pct * rr1 * 0.5
+            else
+                losses      += 1
+                loss_streak += 1
+                balance     -= risk_pct
+            max_dd   := math.max(max_dd, (peak_bal - balance) / peak_bal * 100)
+            in_trade := false
+            trail_sl := na
+            tp1_hit  := false
+    else
+        // FIX: was "atr_tp1f" — corrected to "atr_tp1"
+        if not tp1_hit and close <= entry_p - atr14 * atr_tp1
+            tp1_hit  := true
+            trail_sl := entry_p
+        if tp1_hit or not trail_tp1
+            trail_sl := math.min(trail_sl, close + atr14 * trail_atr)
+        if close <= entry_p - atr14 * atr_tp2
+            wins        += 1
+            loss_streak := 0
+            balance     += risk_pct * rr2
+            peak_bal    := math.max(peak_bal, balance)
+            in_trade    := false
+            trail_sl    := na
+            tp1_hit     := false
+        else if close >= trail_sl
+            if tp1_hit
+                wins        += 1
+                loss_streak := 0
+                balance     += risk_pct * rr1 * 0.5
+            else
+                losses      += 1
+                loss_streak += 1
+                balance     -= risk_pct
+            max_dd   := math.max(max_dd, (peak_bal - balance) / peak_bal * 100)
+            in_trade := false
+            trail_sl := na
+            tp1_hit  := false
+
+if loss_streak >= max_streak and not in_trade
+    loss_streak := 0
+
+winrate = total > 0 ? (wins / total) * 100 : 0.0
+
+// Position sizing
+risk_amt = balance * (risk_pct / 100)
+lot_size = atr14 > 0 ? risk_amt / (atr14 * atr_sl) : 0.0
+
+// ══════════════════════════════════════════════════════════════
+// TREND BACKGROUND & EMA PLOT
+// ══════════════════════════════════════════════════════════════
+bgcolor(trendBull ? color.new(#00bcd4, 97) : color.new(#ff5252, 97))
+plot(ema20, "EMA 20", color=color.new(#00bcd4,30), linewidth=1)
+plot(ema50, "EMA 50", color=color.new(#ff9800,30), linewidth=1)
+
+// ══════════════════════════════════════════════════════════════
+// PLOT SIGNALS
+// ══════════════════════════════════════════════════════════════
+sc_buy_col  = score_buy  >= 80 ? color.new(#00e676,0) : score_buy  >= 60 ? color.new(#00bcd4,10) : color.new(#00bcd4,50)
+sc_sell_col = score_sell >= 80 ? color.new(#ff1744,0) : score_sell >= 60 ? color.new(#ff5252,10) : color.new(#ff5252,50)
+
+plotshape(final_buy,  "BUY",  shape.triangleup,   location.belowbar, sc_buy_col,  size=size.small)
+plotshape(final_sell, "SELL", shape.triangledown, location.abovebar, sc_sell_col, size=size.small)
+
+plot(in_trade and  buy_mode ? tp1_buy  : na, "TP1 Buy",  color=color.new(color.green,50), linewidth=1, style=plot.style_linebr)
+plot(in_trade and  buy_mode ? tp2_buy  : na, "TP2 Buy",  color=color.new(color.green,20), linewidth=1, style=plot.style_linebr)
+plot(in_trade and not buy_mode ? tp1_sell : na, "TP1 Sell", color=color.new(color.red,  50), linewidth=1, style=plot.style_linebr)
+plot(in_trade and not buy_mode ? tp2_sell : na, "TP2 Sell", color=color.new(color.red,  20), linewidth=1, style=plot.style_linebr)
+plot(in_trade               ? trail_sl : na, "Trail SL", color=color.orange,              linewidth=1, style=plot.style_linebr)
+
+plotshape(in_trade and tp1_hit, "TP1 Hit",
+          shape.circle, location.abovebar, color.new(color.teal,40), size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════
+// LABELS
+// ══════════════════════════════════════════════════════════════
+if final_buy
+    ob_txt  = inBullOB  ? "OB+ ✔" : inBullFVG ? "FVG+ ✔" : "—"
+    lbl_txt = "▲ BUY (SMC)\n" +
+              "Score  : " + str.tostring(score_buy)  + "/110\n" +
+              "SL     : " + str.tostring(sl_buy,   format.mintick) + "\n" +
+              "TP1    : " + str.tostring(tp1_buy,  format.mintick) + "\n" +
+              "TP2    : " + str.tostring(tp2_buy,  format.mintick) + "\n" +
+              "R:R    : 1:" + str.tostring(rr2, "#.#") + "\n" +
+              "Lot    : " + str.tostring(lot_size, "#.####") + "\n" +
+              "OB/FVG : " + ob_txt + "\n" +
+              "HTF    : " + (htf_bull ? "Bull ✔" : "Bear ✘") + "\n" +
+              "Sess   : " + sess_lbl + "\n" +
+              "RSI    : " + str.tostring(math.round(rsi14,1))
+    label.new(bar_index, low, lbl_txt,
+              yloc=yloc.belowbar, color=color.new(#00bcd4,80),
+              textcolor=color.new(#00bcd4,0),
+              style=label.style_label_up, size=size.small)
+
+if final_sell
+    ob_txt  = inBearOB  ? "OB− ✔" : inBearFVG ? "FVG− ✔" : "—"
+    lbl_txt = "▼ SELL (SMC)\n" +
+              "Score  : " + str.tostring(score_sell) + "/110\n" +
+              "SL     : " + str.tostring(sl_sell,   format.mintick) + "\n" +
+              "TP1    : " + str.tostring(tp1_sell,  format.mintick) + "\n" +
+              "TP2    : " + str.tostring(tp2_sell,  format.mintick) + "\n" +
+              "R:R    : 1:" + str.tostring(rr2, "#.#") + "\n" +
+              "Lot    : " + str.tostring(lot_size, "#.####") + "\n" +
+              "OB/FVG : " + ob_txt + "\n" +
+              "HTF    : " + (htf_bear ? "Bear ✔" : "Bull ✘") + "\n" +
+              "Sess   : " + sess_lbl + "\n" +
+              "RSI    : " + str.tostring(math.round(rsi14,1))
+    label.new(bar_index, high, lbl_txt,
+              yloc=yloc.abovebar, color=color.new(#ff5252,80),
+              textcolor=color.new(#ff5252,0),
+              style=label.style_label_down, size=size.small)
+
+// ══════════════════════════════════════════════════════════════
+// DASHBOARD  (16 rows)
+// ══════════════════════════════════════════════════════════════
+var table dash = table.new(position.top_right, 2, 17,
+                            border_width=1,
+                            border_color=color.new(color.gray,70),
+                            frame_color=color.new(color.gray, 70),
+                            frame_width=1)
+
+c_on  = color.new(color.green, 70)
+c_off = color.new(color.red,   70)
+c_hdr = color.new(color.gray,  55)
+c_neu = color.new(color.gray,  80)
+
+if barstate.islast
+    // ── Header ────────────────────────────────────────────
+    table.cell(dash,0,0,"SMC Pro V2",bgcolor=c_hdr,text_color=color.white,text_size=size.small,text_halign=text.align_center)
+    table.cell(dash,1,0,"",           bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+
+    // ── Score ────────────────────────────────────────────
+    sc_d  = in_trade ? (buy_mode ? score_buy : score_sell) : 0
+    sc_bg = sc_d >= 80 ? color.new(color.green,70) : sc_d >= 60 ? color.new(color.orange,70) : c_off
+    table.cell(dash,0,1,"Signal Score",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,1,str.tostring(sc_d)+"/110 (min:"+str.tostring(min_score)+")",bgcolor=sc_bg,text_color=color.white,text_size=size.small)
+
+    // ── Win Rate ──────────────────────────────────────────
+    wr_bg = winrate >= 60 ? color.new(color.green,70) : winrate >= 50 ? color.new(color.orange,70) : c_off
+    table.cell(dash,0,2,"Win Rate",  bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,2,str.tostring(winrate,"#.##")+"%",bgcolor=wr_bg,text_color=color.white,text_size=size.small)
+
+    // ── Trades ───────────────────────────────────────────
+    table.cell(dash,0,3,"Trades (W/L)",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,3,str.tostring(total)+"  ("+str.tostring(wins)+"/"+str.tostring(losses)+")",bgcolor=c_neu,text_color=color.white,text_size=size.small)
+
+    // ── Loss Streak ───────────────────────────────────────
+    st_bg = loss_streak >= max_streak - 1 ? c_off : c_neu
+    table.cell(dash,0,4,"Loss Streak",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,4,str.tostring(loss_streak)+" / "+str.tostring(max_streak),bgcolor=st_bg,text_color=color.white,text_size=size.small)
+
+    // ── Balance ───────────────────────────────────────────
+    bal_bg = balance >= 100 ? color.new(color.green,70) : c_off
+    table.cell(dash,0,5,"Sim Balance",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,5,str.tostring(balance,"#.##")+"%",bgcolor=bal_bg,text_color=color.white,text_size=size.small)
+
+    // ── Max DD ────────────────────────────────────────────
+    dd_bg = max_dd > 20 ? c_off : max_dd > 10 ? color.new(color.orange,70) : color.new(color.green,70)
+    table.cell(dash,0,6,"Max Drawdown",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,6,str.tostring(max_dd,"#.##")+"%",bgcolor=dd_bg,text_color=color.white,text_size=size.small)
+
+    // ── LTF Trend ─────────────────────────────────────────
+    table.cell(dash,0,7,"LTF Trend",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,7,trendBull?"▲ BULL":"▼ BEAR",bgcolor=trendBull?c_on:c_off,text_color=trendBull?color.green:color.red,text_size=size.small)
+
+    // ── HTF Trend ─────────────────────────────────────────
+    table.cell(dash,0,8,"HTF Trend ("+htf_tf+")",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,8,htf_bull?"▲ BULL":"▼ BEAR",bgcolor=htf_bull?c_on:c_off,text_color=htf_bull?color.green:color.red,text_size=size.small)
+
+    // ── BOS / CHoCH ───────────────────────────────────────
+    bos_lbl = bullBOS?"BOS ▲":bearBOS?"BOS ▼":"—"
+    bos_bg  = bullBOS?color.new(#00bcd4,60):bearBOS?color.new(#ff5252,60):c_neu
+    table.cell(dash,0,9,"BOS",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,9,bos_lbl,bgcolor=bos_bg,text_color=color.white,text_size=size.small)
+
+    choch_lbl = bullCH?"CHoCH ▲":bearCH?"CHoCH ▼":"—"
+    choch_bg  = bullCH?color.new(#ffeb3b,50):bearCH?color.new(#ffeb3b,50):c_neu
+    choch_tc  = (bullCH or bearCH)?color.black:color.gray
+    table.cell(dash,0,10,"CHoCH",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,10,choch_lbl,bgcolor=choch_bg,text_color=choch_tc,text_size=size.small)
+
+    // ── Order Block ───────────────────────────────────────
+    ob_lbl = inBullOB?"In Bull OB ✔":inBearOB?"In Bear OB ✔":"Outside OB"
+    ob_bg  = inBullOB?color.new(#00bcd4,60):inBearOB?color.new(#ff5252,60):c_neu
+    table.cell(dash,0,11,"Order Block",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,11,ob_lbl,bgcolor=ob_bg,text_color=color.white,text_size=size.small)
+
+    // ── FVG ───────────────────────────────────────────────
+    fvg_lbl = inBullFVG?"In Bull FVG ✔":inBearFVG?"In Bear FVG ✔":"Outside FVG"
+    fvg_bg  = inBullFVG?color.new(#00bcd4,70):inBearFVG?color.new(#ff5252,70):c_neu
+    table.cell(dash,0,12,"FVG",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,12,fvg_lbl,bgcolor=fvg_bg,text_color=color.white,text_size=size.small)
+
+    // ── Volume ────────────────────────────────────────────
+    table.cell(dash,0,13,"Volume",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,13,high_vol?"HIGH ✔":"NORMAL",bgcolor=high_vol?c_on:c_neu,text_color=high_vol?color.green:color.gray,text_size=size.small)
+
+    // ── Session ───────────────────────────────────────────
+    table.cell(dash,0,14,"Session",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,14,sess_lbl,bgcolor=in_sess?c_on:c_off,text_color=in_sess?color.green:color.red,text_size=size.small)
+
+    // ── R:R ───────────────────────────────────────────────
+    table.cell(dash,0,15,"R:R (TP1/TP2)",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,15,"1:"+str.tostring(rr1,"#.#")+" / 1:"+str.tostring(rr2,"#.#"),bgcolor=color.new(color.blue,70),text_color=color.white,text_size=size.small)
+
+    // ── Lot Size ──────────────────────────────────────────
+    table.cell(dash,0,16,"Est. Lot Size",bgcolor=c_hdr,text_color=color.white,text_size=size.small)
+    table.cell(dash,1,16,str.tostring(lot_size,"#.####"),bgcolor=color.new(color.blue,80),text_color=color.white,text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════════
+alertcondition(bullBOS,                       "BOS Bullish",        "BOS Bullish — structure break ke atas")
+alertcondition(bearBOS,                       "BOS Bearish",        "BOS Bearish — structure break ke bawah")
+alertcondition(bullCH,                        "CHoCH Bullish",      "CHoCH — potensi reversal bullish")
+alertcondition(bearCH,                        "CHoCH Bearish",      "CHoCH — potensi reversal bearish")
+alertcondition(final_buy,                     "BUY Signal",         "BUY terkonfirmasi — cek Score, OB/FVG, SL/TP di chart")
+alertcondition(final_sell,                    "SELL Signal",        "SELL terkonfirmasi — cek Score, OB/FVG, SL/TP di chart")
+alertcondition(final_buy  and score_buy  >=80,"High Quality BUY",   "High Quality BUY (Score >= 80)")
+alertcondition(final_sell and score_sell >=80,"High Quality SELL",  "High Quality SELL (Score >= 80)")
+alertcondition(in_trade and tp1_hit,          "TP1 Hit",            "TP1 tercapai — SL pindah ke breakeven")
+alertcondition(loss_streak >= max_streak,     "Loss Streak Warning","Max loss streak — trading dijeda")
+alertcondition(bullFVG,                       "FVG Bullish",        "Fair Value Gap Bullish terbentuk")
+alertcondition(bearFVG,                       "FVG Bearish",        "Fair Value Gap Bearish terbentuk")
+alertcondition(exhaustion,                    "Exhaustion",         "Momentum melemah — waspadai reversal")

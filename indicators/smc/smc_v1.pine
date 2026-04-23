@@ -1,0 +1,260 @@
+//@version=6
+indicator("SMC Pro Indicator V1", overlay=true, max_bars_back=500, max_lines_count=500, max_boxes_count=200, max_labels_count=300)
+
+// ═══════════════════════════════════════════════
+//            INPUT SETTINGS
+// ═══════════════════════════════════════════════
+
+// Structure
+grp_structure = "── Structure Settings ──"
+showBOS       = input.bool(true,  "Show BOS",            group=grp_structure)
+showCHoCH     = input.bool(true,  "Show CHoCH",          group=grp_structure)
+structLen     = input.int(10,     "Swing Length",         group=grp_structure, minval=3, maxval=50)
+
+// FVG
+grp_fvg       = "── Fair Value Gap (FVG) ──"
+showFVG       = input.bool(true,  "Show FVG",            group=grp_fvg)
+fvgBullColor  = input.color(color.new(#00bcd4, 80), "Bullish FVG Color", group=grp_fvg)
+fvgBearColor  = input.color(color.new(#ff5252, 80), "Bearish FVG Color", group=grp_fvg)
+fvgMitigated  = input.bool(true,  "Hide Mitigated FVG",  group=grp_fvg)
+
+// Supply & Demand
+grp_sd        = "── Supply & Demand Zone ──"
+showSupply    = input.bool(true,  "Show Supply Zone",    group=grp_sd)
+showDemand    = input.bool(true,  "Show Demand Zone",    group=grp_sd)
+supplyColor   = input.color(color.new(#ff5252, 75), "Supply Color",  group=grp_sd)
+demandColor   = input.color(color.new(#00bcd4, 75), "Demand Color",  group=grp_sd)
+
+// Fibonacci
+grp_fib       = "── Fibonacci Retracement ──"
+showFib       = input.bool(true,  "Show Fibonacci",      group=grp_fib)
+showFib382    = input.bool(true,  "Show 0.382",          group=grp_fib)
+showFib5      = input.bool(true,  "Show 0.5",            group=grp_fib)
+showFib618    = input.bool(true,  "Show 0.618 (Golden)", group=grp_fib)
+showFib705    = input.bool(true,  "Show 0.705",          group=grp_fib)
+showFib786    = input.bool(true,  "Show 0.786",          group=grp_fib)
+
+// ═══════════════════════════════════════════════
+//   ATR — DIEKSTRAK DI TOP-LEVEL (fix CW10003)
+// ═══════════════════════════════════════════════
+
+atr14 = ta.atr(14)   // dipanggil sekali di global scope, dipakai di mana saja
+
+// ═══════════════════════════════════════════════
+//            SWING HIGH / LOW DETECTION
+// ═══════════════════════════════════════════════
+
+swingHigh = ta.pivothigh(high, structLen, structLen)
+swingLow  = ta.pivotlow(low,  structLen, structLen)
+
+var float lastSwingHigh    = na
+var float lastSwingLow     = na
+var float prevSwingHigh    = na
+var float prevSwingLow     = na
+var int   lastSwingHighBar = na
+var int   lastSwingLowBar  = na
+
+if not na(swingHigh)
+    prevSwingHigh    := lastSwingHigh
+    lastSwingHigh    := swingHigh
+    lastSwingHighBar := bar_index[structLen]
+
+if not na(swingLow)
+    prevSwingLow    := lastSwingLow
+    lastSwingLow    := swingLow
+    lastSwingLowBar := bar_index[structLen]
+
+// ═══════════════════════════════════════════════
+//            BOS & CHoCH DETECTION
+// ═══════════════════════════════════════════════
+
+var bool bullishBOS = false
+var bool bearishBOS = false
+var bool bullCHoCH  = false
+var bool bearCHoCH  = false
+
+bullishBOS := not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+bearishBOS := not na(lastSwingLow)  and close < lastSwingLow  and close[1] >= lastSwingLow
+bullCHoCH  := not na(prevSwingHigh) and close > prevSwingHigh and close[1] <= prevSwingHigh and bearishBOS[1]
+bearCHoCH  := not na(prevSwingLow)  and close < prevSwingLow  and close[1] >= prevSwingLow  and bullishBOS[1]
+
+// Offset pakai atr14 dari global scope — tidak ada ta.atr di dalam if-block
+labelOffset     = atr14
+labelOffsetLong = atr14 * 1.5
+
+if showBOS
+    if bullishBOS
+        label.new(bar_index, low - labelOffset, "BOS",
+                  style=label.style_label_up,
+                  color=color.new(#00bcd4, 20),
+                  textcolor=color.white, size=size.small)
+    if bearishBOS
+        label.new(bar_index, high + labelOffset, "BOS",
+                  style=label.style_label_down,
+                  color=color.new(#ff5252, 20),
+                  textcolor=color.white, size=size.small)
+
+if showCHoCH
+    if bullCHoCH
+        label.new(bar_index, low - labelOffsetLong, "CHoCH",
+                  style=label.style_label_up,
+                  color=color.new(#ffeb3b, 20),
+                  textcolor=color.black, size=size.small)
+    if bearCHoCH
+        label.new(bar_index, high + labelOffsetLong, "CHoCH",
+                  style=label.style_label_down,
+                  color=color.new(#ffeb3b, 20),
+                  textcolor=color.black, size=size.small)
+
+// ═══════════════════════════════════════════════
+//            FAIR VALUE GAP (FVG)
+// ═══════════════════════════════════════════════
+
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+
+var box[]   fvgBoxes  = array.new_box()
+var bool[]  fvgIsBull = array.new_bool()
+var float[] fvgTop    = array.new_float()
+var float[] fvgBot    = array.new_float()
+
+if showFVG
+    if bullFVG
+        b = box.new(bar_index[2], low, bar_index + 20, high[2],
+                    bgcolor=fvgBullColor,
+                    border_color=color.new(#00bcd4, 50), border_width=1)
+        array.push(fvgBoxes,  b)
+        array.push(fvgIsBull, true)
+        array.push(fvgTop,    low)
+        array.push(fvgBot,    high[2])
+        label.new(bar_index[1], math.avg(low, high[2]), "FVG",
+                  style=label.style_label_right,
+                  color=color.new(#00bcd4, 60),
+                  textcolor=color.white, size=size.tiny)
+
+    if bearFVG
+        b = box.new(bar_index[2], high, bar_index + 20, low[2],
+                    bgcolor=fvgBearColor,
+                    border_color=color.new(#ff5252, 50), border_width=1)
+        array.push(fvgBoxes,  b)
+        array.push(fvgIsBull, false)
+        array.push(fvgTop,    high)
+        array.push(fvgBot,    low[2])
+        label.new(bar_index[1], math.avg(high, low[2]), "FVG",
+                  style=label.style_label_right,
+                  color=color.new(#ff5252, 60),
+                  textcolor=color.white, size=size.tiny)
+
+// Extend & mitigate FVG boxes
+if array.size(fvgBoxes) > 0
+    for i = array.size(fvgBoxes) - 1 to 0
+        b      = array.get(fvgBoxes,  i)
+        isBull = array.get(fvgIsBull, i)
+        top    = array.get(fvgTop,    i)
+        bot    = array.get(fvgBot,    i)
+        box.set_right(b, bar_index + 5)
+        if fvgMitigated
+            mitigated = isBull ? close < top : close > bot
+            if mitigated
+                box.delete(b)
+                array.remove(fvgBoxes,  i)
+                array.remove(fvgIsBull, i)
+                array.remove(fvgTop,    i)
+                array.remove(fvgBot,    i)
+
+// ═══════════════════════════════════════════════
+//            SUPPLY & DEMAND ZONES
+// ═══════════════════════════════════════════════
+
+// atr14[structLen] = nilai ATR pada bar swing — tetap dari global series
+atrAtSwing = atr14[structLen]
+
+supplyZone = not na(swingHigh) and (high[structLen] - close[structLen]) > atrAtSwing * 0.5
+demandZone = not na(swingLow)  and (close[structLen] - low[structLen])  > atrAtSwing * 0.5
+
+if showSupply and supplyZone
+    box.new(bar_index[structLen] - structLen, high[structLen],
+            bar_index + 30,                  high[structLen] - atrAtSwing * 0.8,
+            bgcolor=supplyColor, border_color=color.new(#ff5252, 40), border_width=1)
+    label.new(bar_index[structLen], high[structLen] + atrAtSwing * 0.3,
+              "Supply Zone", style=label.style_label_down,
+              color=color.new(#ff5252, 30), textcolor=color.white, size=size.small)
+
+if showDemand and demandZone
+    box.new(bar_index[structLen] - structLen, low[structLen],
+            bar_index + 30,                  low[structLen] + atrAtSwing * 0.8,
+            bgcolor=demandColor, border_color=color.new(#00bcd4, 40), border_width=1)
+    label.new(bar_index[structLen], low[structLen] - atrAtSwing * 0.3,
+              "Demand Zone", style=label.style_label_up,
+              color=color.new(#00bcd4, 30), textcolor=color.white, size=size.small)
+
+// ═══════════════════════════════════════════════
+//            FIBONACCI RETRACEMENT
+// ═══════════════════════════════════════════════
+
+var float fibHigh = na
+var float fibLow  = na
+
+if not na(swingHigh)
+    fibHigh := swingHigh
+if not na(swingLow)
+    fibLow  := swingLow
+
+drawFib(level, lvlHigh, lvlLow, clr) =>
+    price = lvlHigh - (lvlHigh - lvlLow) * level
+    line.new(bar_index - 30, price, bar_index + 10, price,
+             color=clr, width=1, style=line.style_dashed)
+    label.new(bar_index + 10, price,
+              str.tostring(level, "#.###") + "  " + str.tostring(math.round(price, 2)),
+              style=label.style_label_left,
+              color=color.new(color.black, 80),
+              textcolor=clr, size=size.tiny)
+
+if showFib and not na(fibHigh) and not na(fibLow) and fibHigh != fibLow
+    if showFib382
+        drawFib(0.382, fibHigh, fibLow, color.new(#b0bec5, 20))
+    if showFib5
+        drawFib(0.500, fibHigh, fibLow, color.new(#90a4ae, 20))
+    if showFib618
+        drawFib(0.618, fibHigh, fibLow, color.new(#ffeb3b, 10))
+    if showFib705
+        drawFib(0.705, fibHigh, fibLow, color.new(#ff9800, 20))
+    if showFib786
+        drawFib(0.786, fibHigh, fibLow, color.new(#ff5252, 20))
+
+// ═══════════════════════════════════════════════
+//            TREND BACKGROUND & EMA
+// ═══════════════════════════════════════════════
+
+ema20     = ta.ema(close, 20)
+ema50     = ta.ema(close, 50)
+trendBull = ema20 > ema50
+
+bgcolor(trendBull ? color.new(#00bcd4, 97) : color.new(#ff5252, 97), title="Trend Background")
+plot(ema20, title="EMA 20", color=color.new(#00bcd4, 30), linewidth=1)
+plot(ema50, title="EMA 50", color=color.new(#ff9800, 30), linewidth=1)
+
+// ═══════════════════════════════════════════════
+//            MOMENTUM EXHAUSTION
+// ═══════════════════════════════════════════════
+
+bodySize   = math.abs(close - open)
+avgBody    = ta.sma(bodySize, 10)
+exhaustion = bodySize < avgBody * 0.4
+
+plotshape(exhaustion and close > open, "Bull Exhaustion", shape.circle,
+          location.belowbar, color.new(#ffeb3b, 40), size=size.tiny)
+plotshape(exhaustion and close < open, "Bear Exhaustion", shape.circle,
+          location.abovebar, color.new(#ffeb3b, 40), size=size.tiny)
+
+// ═══════════════════════════════════════════════
+//            ALERTS
+// ═══════════════════════════════════════════════
+
+alertcondition(bullishBOS, "BOS Bullish",   "BOS Bullish - Harga break structure ke atas!")
+alertcondition(bearishBOS, "BOS Bearish",   "BOS Bearish - Harga break structure ke bawah!")
+alertcondition(bullCHoCH,  "CHoCH Bullish", "CHoCH! Potensi reversal bullish!")
+alertcondition(bearCHoCH,  "CHoCH Bearish", "CHoCH! Potensi reversal bearish!")
+alertcondition(bullFVG,    "FVG Bullish",   "Fair Value Gap Bullish terbentuk!")
+alertcondition(bearFVG,    "FVG Bearish",   "Fair Value Gap Bearish terbentuk!")
+alertcondition(exhaustion, "Exhaustion",    "Momentum melemah - waspadai reversal!")
